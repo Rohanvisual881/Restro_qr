@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
-import QRCode from "qrcode.react";
+import { QRCodeCanvas } from "qrcode.react";
 
 type RestaurantTable = {
   id: string;
@@ -439,7 +439,7 @@ export default function TablesPage() {
 
                     <div className="mt-6 flex justify-center rounded-2xl bg-white p-4">
 
-                      <QRCode
+                      <QRCodeCanvas
                         id={`qr-${table.id}`}
                         value={getMenuUrl(
                           table.qr_token
