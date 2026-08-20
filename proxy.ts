@@ -1,90 +1,55 @@
-import {
-  NextRequest,
-  NextResponse,
-} from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
-const ROOT_DOMAIN =
-  "khapiyo.in";
+const ROOT_DOMAIN = "khapiyo.in";
 
-export function proxy(
-  request: NextRequest
-) {
-  const hostname =
-    request.headers.get("host") || "";
+export function proxy(request: NextRequest) {
+  const hostname = request.headers.get("host") || "";
+  const hostnameWithoutPort = hostname.split(":")[0].toLowerCase();
 
-  const hostnameWithoutPort =
-    hostname.split(":")[0].toLowerCase();
+  // =========================
+  // LOCAL DEVELOPMENT
+  // =========================
+  // Example:
+  // royalbites.localhost:3000
+  // → /restaurant/royalbites
 
-  /*
-   * Local development
-   *
-   * Example:
-   * royalbites.localhost:3000
-   */
+  if (hostnameWithoutPort.endsWith(".localhost")) {
+    const subdomain = hostnameWithoutPort.replace(".localhost", "");
 
-  if (
-    hostnameWithoutPort.endsWith(
-      ".localhost"
-    )
-  ) {
-    const subdomain =
-      hostnameWithoutPort.replace(
-        ".localhost",
-        ""
-      );
+    if (subdomain && subdomain !== "www") {
+      const url = request.nextUrl.clone();
 
-    if (
-      subdomain &&
-      subdomain !== "www"
-    ) {
-      const url =
-        request.nextUrl.clone();
+      url.pathname = `/restaurant/${subdomain}`;
 
-      url.pathname =
-        `/restaurant/${subdomain}`;
-
-      return NextResponse.rewrite(
-        url
-      );
+      return NextResponse.rewrite(url);
     }
 
     return NextResponse.next();
   }
 
-  /*
-   * Production
-   *
-   * Example:
-   * royalbites.khapiyo.in
-   */
+  // =========================
+  // PRODUCTION
+  // =========================
+  // Example:
+  // royalbites.khapiyo.in
+  // → /restaurant/royalbites
 
-  if (
-    hostnameWithoutPort.endsWith(
-      `.${ROOT_DOMAIN}`
-    )
-  ) {
-    const subdomain =
-      hostnameWithoutPort.slice(
-        0,
-        -(`.${ROOT_DOMAIN}`).length
-      );
+  if (hostnameWithoutPort.endsWith(`.${ROOT_DOMAIN}`)) {
+    const subdomain = hostnameWithoutPort.slice(
+      0,
+      -(`.${ROOT_DOMAIN}`).length
+    );
 
-    if (
-      subdomain &&
-      subdomain !== "www"
-    ) {
-      const url =
-        request.nextUrl.clone();
+    if (subdomain && subdomain !== "www") {
+      const url = request.nextUrl.clone();
 
-      url.pathname =
-        `/restaurant/${subdomain}`;
+      url.pathname = `/restaurant/${subdomain}`;
 
-      return NextResponse.rewrite(
-        url
-      );
+      return NextResponse.rewrite(url);
     }
   }
 
+  // Normal Khapiyo domain
   return NextResponse.next();
 }
 
