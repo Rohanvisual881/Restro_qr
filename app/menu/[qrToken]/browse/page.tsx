@@ -50,6 +50,7 @@ type CurrentOrder = {
   status: string;
   total_amount: number;
   created_at: string;
+  tracking_token: string;
 };
 
 const STATUS_STEPS = [
@@ -140,8 +141,7 @@ export default function BrowseMenu({
   params: Promise<{ qrToken: string }>;
 }) {
   const pageRef = useRef<HTMLDivElement>(null);
-  const menuGridRef =
-    useRef<HTMLDivElement>(null);
+  const menuGridRef = useRef<HTMLDivElement>(null);
 
   const [restaurant, setRestaurant] =
     useState<Restaurant | null>(null);
@@ -194,6 +194,23 @@ export default function BrowseMenu({
   const [menuRefreshing, setMenuRefreshing] =
     useState(false);
 
+  // Customer verification gate. A customer must enter
+  // their name and mobile number before seeing the menu.
+  const [customerVerified, setCustomerVerified] =
+    useState(false);
+
+  const [customerName, setCustomerName] =
+    useState("");
+
+  const [customerPhone, setCustomerPhone] =
+    useState("");
+
+  const [customerFormError, setCustomerFormError] =
+    useState("");
+
+  const [verifyingCustomer, setVerifyingCustomer] =
+    useState(false);
+
   /*
   ==========================================================
   LOAD MENU
@@ -203,11 +220,9 @@ export default function BrowseMenu({
   useEffect(() => {
     async function loadMenu() {
       try {
-        const { qrToken } =
-          await params;
+        const { qrToken } = await params;
 
-        const supabase =
-          createClient();
+        const supabase = createClient();
 
         const {
           data: table,
@@ -217,65 +232,34 @@ export default function BrowseMenu({
           .select(
             "id, restaurant_id, table_number"
           )
-          .eq(
-            "qr_token",
-            qrToken
-          )
-          .eq(
-            "is_active",
-            true
-          )
+          .eq("qr_token", qrToken)
+          .eq("is_active", true)
           .maybeSingle();
 
         if (tableError) {
-          setError(
-            tableError.message
-          );
+          setError(tableError.message);
           setLoading(false);
           return;
         }
 
         if (!table) {
-          setError(
-            "Table not found."
-          );
+          setError("Table not found.");
           setLoading(false);
           return;
         }
 
-        setTableNumber(
-          table.table_number
+        setTableNumber(table.table_number);
+
+        // Keep the exact QR table id available for customer
+        // verification and order creation.
+        sessionStorage.setItem(
+          "restaurant_current_table_id",
+          table.id
         );
 
-        const existingCustomer =
-          sessionStorage.getItem(
-            "restaurant_customer"
-          );
-
-        if (existingCustomer) {
-          try {
-            const customer:
-              CustomerData =
-              JSON.parse(
-                existingCustomer
-              );
-
-            sessionStorage.setItem(
-              "restaurant_customer",
-              JSON.stringify({
-                ...customer,
-                tableId:
-                  table.id,
-                tableNumber:
-                  table.table_number,
-                restaurantId:
-                  table.restaurant_id,
-              })
-            );
-          } catch {
-            // Keep the current session intact.
-          }
-        }
+        // Customer details must be entered on every QR menu access.
+        // Do not automatically reuse a previous customer's details.
+        sessionStorage.removeItem("restaurant_customer");
 
         const {
           data: restaurantData,
@@ -285,40 +269,29 @@ export default function BrowseMenu({
           .select(
             "id, name, description, logo_url"
           )
-          .eq(
-            "id",
-            table.restaurant_id
-          )
+          .eq("id", table.restaurant_id)
           .maybeSingle();
 
         if (restaurantError) {
-          setError(
-            restaurantError.message
-          );
+          setError(restaurantError.message);
           setLoading(false);
           return;
         }
 
         if (!restaurantData) {
-          setError(
-            "Restaurant not found."
-          );
+          setError("Restaurant not found.");
           setLoading(false);
           return;
         }
 
-        setRestaurant(
-          restaurantData
-        );
+        setRestaurant(restaurantData);
 
         const {
           data: categoryData,
           error: categoryError,
         } = await supabase
           .from("categories")
-          .select(
-            "id, name"
-          )
+          .select("id, name")
           .eq(
             "restaurant_id",
             table.restaurant_id
@@ -326,16 +299,12 @@ export default function BrowseMenu({
           .order("name");
 
         if (categoryError) {
-          setError(
-            categoryError.message
-          );
+          setError(categoryError.message);
           setLoading(false);
           return;
         }
 
-        setCategories(
-          categoryData || []
-        );
+        setCategories(categoryData || []);
 
         const {
           data: menuData,
@@ -349,32 +318,23 @@ export default function BrowseMenu({
             "restaurant_id",
             table.restaurant_id
           )
-          .eq(
-            "is_available",
-            true
-          )
+          .eq("is_available", true)
           .order("name");
 
         if (menuError) {
-          setError(
-            menuError.message
-          );
+          setError(menuError.message);
           setLoading(false);
           return;
         }
 
-        setItems(
-          menuData || []
-        );
+        setItems(menuData || []);
 
         loadSavedOrders();
 
         setLoading(false);
       } catch (err) {
         console.error(err);
-        setError(
-          "Unable to load menu."
-        );
+        setError("Unable to load menu.");
         setLoading(false);
       }
     }
@@ -399,17 +359,15 @@ export default function BrowseMenu({
     }
 
     try {
-      const parsed =
-        JSON.parse(saved);
+      const parsed = JSON.parse(saved);
 
-      if (
-        Array.isArray(parsed)
-      ) {
+      if (Array.isArray(parsed)) {
         setOrders(
           parsed.filter(
             (order) =>
               order &&
-              order.id
+              order.id &&
+              order.tracking_token
           )
         );
       }
@@ -422,32 +380,110 @@ export default function BrowseMenu({
 
   /*
   ==========================================================
+  CUSTOMER VERIFICATION
+  ==========================================================
+  */
+
+  function continueToMenu() {
+    const name = customerName.trim();
+    const phone = customerPhone.replace(/\D/g, "");
+
+    setCustomerFormError("");
+
+    if (!name) {
+      setCustomerFormError("Please enter your name.");
+      return;
+    }
+
+    if (!/^\d{10}$/.test(phone)) {
+      setCustomerFormError(
+        "Please enter a valid 10-digit mobile number."
+      );
+      return;
+    }
+
+    if (!restaurant?.id || !tableNumber) {
+      setCustomerFormError(
+        "Restaurant or table information is missing. Please scan the QR again."
+      );
+      return;
+    }
+
+    setVerifyingCustomer(true);
+
+    const customer: CustomerData = {
+      name,
+      phone,
+      tableId: tableNumber
+        ? (() => {
+            try {
+              const raw = sessionStorage.getItem(
+                "restaurant_table_context"
+              );
+              return raw || "";
+            } catch {
+              return "";
+            }
+          })()
+        : "",
+      tableNumber,
+      restaurantId: restaurant.id,
+    };
+
+    // The exact table id is stored by loadMenu below.
+    // We keep it separately so the order always uses the QR table.
+    const tableId = sessionStorage.getItem(
+      "restaurant_current_table_id"
+    );
+
+    if (!tableId) {
+      setCustomerFormError(
+        "Table information is missing. Please scan the QR again."
+      );
+      setVerifyingCustomer(false);
+      return;
+    }
+
+    const verifiedCustomer: CustomerData = {
+      ...customer,
+      tableId,
+    };
+
+    sessionStorage.setItem(
+      "restaurant_customer",
+      JSON.stringify(verifiedCustomer)
+    );
+
+    setCustomerName(name);
+    setCustomerPhone(phone);
+    setCustomerVerified(true);
+    setVerifyingCustomer(false);
+  }
+
+  /*
+  ==========================================================
   LIVE ORDER TRACKING
   ==========================================================
   */
 
   useEffect(() => {
-    if (
-      orders.length === 0
-    ) {
+    if (orders.length === 0) {
       return;
     }
 
     let cancelled = false;
 
     async function checkOrders() {
-      const supabase =
-        createClient();
+      const supabase = createClient();
 
-      const orderIds =
-        orders.map(
+      const trackingTokens = orders
+        .map(
           (order) =>
-            order.id
-        );
+            order.tracking_token
+        )
+        .filter(Boolean);
 
-      if (
-        orderIds.length === 0
-      ) {
+      if (trackingTokens.length === 0) {
         return;
       }
 
@@ -457,11 +493,11 @@ export default function BrowseMenu({
       } = await supabase
         .from("orders")
         .select(
-          "id, status, total_amount, created_at"
+          "id, status, total_amount, created_at, tracking_token"
         )
         .in(
-          "id",
-          orderIds
+          "tracking_token",
+          trackingTokens
         );
 
       if (
@@ -472,47 +508,38 @@ export default function BrowseMenu({
         return;
       }
 
-      const latest =
-        new Map(
-          data.map(
-            (order) => [
-              order.id,
-              {
-                id: order.id,
-                status:
-                  order.status,
-                total_amount:
-                  Number(
-                    order.total_amount ||
-                      0
-                  ),
-                created_at:
-                  order.created_at,
-              },
-            ]
-          )
+      const latest = new Map(
+        data.map((order) => [
+          order.tracking_token,
+          {
+            id: order.id,
+            status: order.status,
+            total_amount: Number(
+              order.total_amount || 0
+            ),
+            created_at:
+              order.created_at,
+            tracking_token:
+              order.tracking_token,
+          },
+        ])
+      );
+
+      setOrders((current) => {
+        const updated = current.map(
+          (saved) =>
+            latest.get(
+              saved.tracking_token
+            ) || saved
         );
 
-      setOrders(
-        (current) => {
-          const updated =
-            current.map(
-              (saved) =>
-                latest.get(
-                  saved.id
-                ) || saved
-            );
+        sessionStorage.setItem(
+          "restaurant_orders",
+          JSON.stringify(updated)
+        );
 
-          sessionStorage.setItem(
-            "restaurant_orders",
-            JSON.stringify(
-              updated
-            )
-          );
-
-          return updated;
-        }
-      );
+        return updated;
+      });
     }
 
     checkOrders();
@@ -525,9 +552,7 @@ export default function BrowseMenu({
 
     return () => {
       cancelled = true;
-      window.clearInterval(
-        interval
-      );
+      window.clearInterval(interval);
     };
   }, [orders.length]);
 
@@ -545,26 +570,24 @@ export default function BrowseMenu({
       return;
     }
 
-    const ctx =
-      gsap.context(() => {
-        gsap.fromTo(
-          ".customer-reveal",
-          {
-            opacity: 0,
-            y: 16,
-          },
-          {
-            opacity: 1,
-            y: 0,
-            duration: 0.42,
-            stagger: 0.045,
-            ease: "power2.out",
-          }
-        );
-      }, pageRef);
+    const ctx = gsap.context(() => {
+      gsap.fromTo(
+        ".customer-reveal",
+        {
+          opacity: 0,
+          y: 16,
+        },
+        {
+          opacity: 1,
+          y: 0,
+          duration: 0.42,
+          stagger: 0.045,
+          ease: "power2.out",
+        }
+      );
+    }, pageRef);
 
-    return () =>
-      ctx.revert();
+    return () => ctx.revert();
   }, [loading]);
 
   useEffect(() => {
@@ -575,12 +598,11 @@ export default function BrowseMenu({
       return;
     }
 
-    const cards =
-      Array.from(
-        menuGridRef.current.querySelectorAll(
-          ".product-card"
-        )
-      );
+    const cards = Array.from(
+      menuGridRef.current.querySelectorAll(
+        ".product-card"
+      )
+    );
 
     gsap.fromTo(
       cards,
@@ -613,57 +635,48 @@ export default function BrowseMenu({
     itemId: string,
     quantity: number
   ) {
-    setCart(
-      (current) => {
-        if (
-          quantity <= 0
-        ) {
-          return current.filter(
-            (item) =>
-              item.id !==
-              itemId
-          );
-        }
-
-        const exists =
-          current.some(
-            (item) =>
-              item.id ===
-              itemId
-          );
-
-        if (!exists) {
-          const menuItem =
-            items.find(
-              (item) =>
-                item.id ===
-                itemId
-            );
-
-          if (!menuItem) {
-            return current;
-          }
-
-          return [
-            ...current,
-            {
-              ...menuItem,
-              quantity,
-            },
-          ];
-        }
-
-        return current.map(
+    setCart((current) => {
+      if (quantity <= 0) {
+        return current.filter(
           (item) =>
-            item.id === itemId
-              ? {
-                  ...item,
-                  quantity,
-                }
-              : item
+            item.id !== itemId
         );
       }
-    );
+
+      const exists = current.some(
+        (item) =>
+          item.id === itemId
+      );
+
+      if (!exists) {
+        const menuItem = items.find(
+          (item) =>
+            item.id === itemId
+        );
+
+        if (!menuItem) {
+          return current;
+        }
+
+        return [
+          ...current,
+          {
+            ...menuItem,
+            quantity,
+          },
+        ];
+      }
+
+      return current.map(
+        (item) =>
+          item.id === itemId
+            ? {
+                ...item,
+                quantity,
+              }
+            : item
+      );
+    });
   }
 
   function getCartQuantity(
@@ -684,9 +697,7 @@ export default function BrowseMenu({
     setSuccessMessage("");
 
     const next =
-      getCartQuantity(
-        item.id
-      ) + 1;
+      getCartQuantity(item.id) + 1;
 
     updateCartQuantity(
       item.id,
@@ -718,9 +729,7 @@ export default function BrowseMenu({
   ) {
     updateCartQuantity(
       itemId,
-      getCartQuantity(
-        itemId
-      ) + 1
+      getCartQuantity(itemId) + 1
     );
   }
 
@@ -729,27 +738,23 @@ export default function BrowseMenu({
   ) {
     updateCartQuantity(
       itemId,
-      getCartQuantity(
-        itemId
-      ) - 1
+      getCartQuantity(itemId) - 1
     );
   }
 
-  const cartCount =
-    cart.reduce(
-      (sum, item) =>
-        sum + item.quantity,
-      0
-    );
+  const cartCount = cart.reduce(
+    (sum, item) =>
+      sum + item.quantity,
+    0
+  );
 
-  const cartTotal =
-    cart.reduce(
-      (sum, item) =>
-        sum +
-        Number(item.price) *
-          item.quantity,
-      0
-    );
+  const cartTotal = cart.reduce(
+    (sum, item) =>
+      sum +
+      Number(item.price) *
+        item.quantity,
+    0
+  );
 
   /*
   ==========================================================
@@ -759,10 +764,9 @@ export default function BrowseMenu({
 
   const filteredItems =
     useMemo(() => {
-      const query =
-        search
-          .trim()
-          .toLowerCase();
+      const query = search
+        .trim()
+        .toLowerCase();
 
       return items.filter(
         (item) => {
@@ -803,11 +807,14 @@ export default function BrowseMenu({
   */
 
   async function placeOrder() {
-    if (
-      cart.length === 0
-    ) {
+    if (cart.length === 0) {
+      setOrderMessage("Your cart is empty.");
+      return;
+    }
+
+    if (!restaurant?.id || !tableNumber) {
       setOrderMessage(
-        "Your cart is empty."
+        "Restaurant or table information is missing. Please scan the QR again."
       );
       return;
     }
@@ -817,167 +824,153 @@ export default function BrowseMenu({
     setSuccessMessage("");
 
     try {
-      const customerData =
-        sessionStorage.getItem(
-          "restaurant_customer"
+      const supabase = createClient();
+      const { qrToken } = await params;
+
+      const { data: table, error: tableError } = await supabase
+        .from("restaurant_tables")
+        .select("id, restaurant_id, table_number")
+        .eq("qr_token", qrToken)
+        .eq("is_active", true)
+        .maybeSingle();
+
+      if (tableError) {
+        console.error("TABLE LOOKUP ERROR:", tableError);
+        setOrderMessage(tableError.message);
+        setPlacingOrder(false);
+        return;
+      }
+
+      if (!table) {
+        setOrderMessage(
+          "Table not found. Please scan the QR code again."
         );
+        setPlacingOrder(false);
+        return;
+      }
+
+      if (table.restaurant_id !== restaurant.id) {
+        setOrderMessage("Invalid restaurant/table combination.");
+        setPlacingOrder(false);
+        return;
+      }
+
+      const customerData =
+        sessionStorage.getItem("restaurant_customer");
 
       if (!customerData) {
         setOrderMessage(
-          "Customer information not found. Please scan the QR again."
+          "Customer details are missing. Please refresh and enter your name and mobile number."
         );
         setPlacingOrder(false);
         return;
       }
 
-      const customer:
-        CustomerData =
-        JSON.parse(
-          customerData
+      let customer: CustomerData;
+
+      try {
+        customer = JSON.parse(customerData);
+      } catch {
+        setOrderMessage(
+          "Customer details are invalid. Please refresh and enter them again."
         );
+        setPlacingOrder(false);
+        return;
+      }
 
       if (
-        !customer.restaurantId ||
-        !customer.tableId
+        customer.restaurantId !== table.restaurant_id ||
+        customer.tableId !== table.id ||
+        !customer.name?.trim() ||
+        !/^\d{10}$/.test(customer.phone || "")
       ) {
         setOrderMessage(
-          "Restaurant or table information is missing."
+          "Customer details do not match this table. Please refresh and enter them again."
         );
         setPlacingOrder(false);
         return;
       }
 
-      const supabase =
-        createClient();
-
-      const {
-        data: order,
-        error: orderError,
-      } = await supabase
+      const { data: order, error: orderError } = await supabase
         .from("orders")
         .insert({
-          restaurant_id:
-            customer.restaurantId,
-          table_id:
-            customer.tableId,
-          customer_name:
-            customer.name,
-          customer_phone:
-            customer.phone ||
-            null,
-          status:
-            "pending",
-          total_amount:
-            cartTotal,
+          restaurant_id: table.restaurant_id,
+          table_id: table.id,
+          customer_name: customer.name,
+          customer_phone: customer.phone,
+          status: "pending",
+          total_amount: cartTotal,
         })
         .select(
-          "id, status, total_amount, created_at"
+          "id, status, total_amount, created_at, tracking_token"
         )
         .single();
 
-      if (
-        orderError ||
-        !order
-      ) {
+      if (orderError || !order) {
+        console.error("CREATE ORDER ERROR:", orderError);
         setOrderMessage(
-          orderError?.message ||
-            "Unable to create the order."
+          orderError?.message || "Unable to create the order."
         );
         setPlacingOrder(false);
         return;
       }
 
-      const orderItems =
-        cart.map(
-          (item) => ({
-            order_id:
-              order.id,
-            menu_item_id:
-              item.id,
-            item_name:
-              item.name,
-            price:
-              Number(
-                item.price
-              ),
-            quantity:
-              item.quantity,
-          })
+      if (!order.tracking_token) {
+        console.error("Order created without tracking_token:", order);
+        setOrderMessage(
+          "Order was created, but tracking could not be generated."
         );
+        setPlacingOrder(false);
+        return;
+      }
 
-      const {
-        error:
-          orderItemsError,
-      } = await supabase
+      const orderItems = cart.map((item) => ({
+        order_id: order.id,
+        menu_item_id: item.id,
+        item_name: item.name,
+        price: Number(item.price),
+        quantity: item.quantity,
+      }));
+
+      const { error: orderItemsError } = await supabase
         .from("order_items")
-        .insert(
-          orderItems
-        );
+        .insert(orderItems);
 
-      if (
-        orderItemsError
-      ) {
-        setOrderMessage(
-          orderItemsError.message
-        );
+      if (orderItemsError) {
+        console.error("ORDER ITEMS ERROR:", orderItemsError);
+        setOrderMessage(orderItemsError.message);
         setPlacingOrder(false);
         return;
       }
 
-      const newOrder:
-        CurrentOrder = {
+      const newOrder: CurrentOrder = {
         id: order.id,
-        status:
-          order.status,
-        total_amount:
-          Number(
-            order.total_amount ||
-              cartTotal
-          ),
-        created_at:
-          order.created_at,
+        status: order.status,
+        total_amount: Number(order.total_amount || cartTotal),
+        created_at: order.created_at,
+        tracking_token: order.tracking_token,
       };
 
-      setOrders(
-        (current) => {
-          const updated = [
-            ...current,
-            newOrder,
-          ];
+      setOrders((current) => {
+        const updated = [...current, newOrder];
+        sessionStorage.setItem(
+          "restaurant_orders",
+          JSON.stringify(updated)
+        );
+        return updated;
+      });
 
-          sessionStorage.setItem(
-            "restaurant_orders",
-            JSON.stringify(
-              updated
-            )
-          );
-
-          return updated;
-        }
-      );
-
-      setSelectedOrderId(
-        newOrder.id
-      );
-
+      setSelectedOrderId(order.id);
       setCart([]);
       setCartOpen(false);
       setTrackingOpen(true);
+      setSuccessMessage("Order placed successfully! 🎉");
 
-      setSuccessMessage(
-        "Order placed successfully! 🎉"
-      );
-
-      window.setTimeout(
-        () =>
-          setSuccessMessage(
-            ""
-          ),
-        4000
-      );
+      window.setTimeout(() => {
+        setSuccessMessage("");
+      }, 4000);
     } catch (err) {
-      console.error(err);
-
+      console.error("PLACE ORDER ERROR:", err);
       setOrderMessage(
         err instanceof Error
           ? err.message
@@ -1027,9 +1020,8 @@ export default function BrowseMenu({
         ]?.id ||
         null
     );
-    setTrackingOpen(
-      true
-    );
+
+    setTrackingOpen(true);
 
     requestAnimationFrame(() => {
       gsap.fromTo(
@@ -1059,9 +1051,7 @@ export default function BrowseMenu({
         duration: 0.16,
         ease: "power1.in",
         onComplete: () =>
-          setTrackingOpen(
-            false
-          ),
+          setTrackingOpen(false),
       }
     );
   }
@@ -1078,24 +1068,24 @@ export default function BrowseMenu({
         <div className="mx-auto max-w-5xl space-y-4">
           <div className="h-20 animate-pulse rounded-[22px] bg-white" />
           <div className="h-14 animate-pulse rounded-2xl bg-white" />
+
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
             {Array.from({
               length: 8,
-            }).map(
-              (_, index) => (
-                <div
-                  key={index}
-                  className="overflow-hidden rounded-[18px] bg-white"
-                >
-                  <div className="aspect-square animate-pulse bg-[#ECEDEA]" />
-                  <div className="space-y-2 p-3">
-                    <div className="h-4 animate-pulse rounded bg-[#ECEDEA]" />
-                    <div className="h-3 w-2/3 animate-pulse rounded bg-[#ECEDEA]" />
-                    <div className="h-4 w-1/3 animate-pulse rounded bg-[#ECEDEA]" />
-                  </div>
+            }).map((_, index) => (
+              <div
+                key={index}
+                className="overflow-hidden rounded-[18px] bg-white"
+              >
+                <div className="aspect-square animate-pulse bg-[#ECEDEA]" />
+
+                <div className="space-y-2 p-3">
+                  <div className="h-4 animate-pulse rounded bg-[#ECEDEA]" />
+                  <div className="h-3 w-2/3 animate-pulse rounded bg-[#ECEDEA]" />
+                  <div className="h-4 w-1/3 animate-pulse rounded bg-[#ECEDEA]" />
                 </div>
-              )
-            )}
+              </div>
+            ))}
           </div>
         </div>
       </main>
@@ -1140,6 +1130,137 @@ export default function BrowseMenu({
 
   /*
   ==========================================================
+  CUSTOMER DETAILS GATE
+  ==========================================================
+  */
+
+  if (!customerVerified) {
+    return (
+      <main className="min-h-screen bg-[#F7F7F5] px-4 py-6 text-[#1F1F1F] sm:px-6 sm:py-10">
+        <div className="mx-auto flex min-h-[calc(100vh-3rem)] w-full max-w-md items-center justify-center">
+          <div className="w-full overflow-hidden rounded-[28px] border border-[#E9E9E7] bg-white shadow-[0_18px_50px_rgba(0,0,0,0.08)]">
+            <div className="bg-[#0C831F] px-6 pb-8 pt-7 text-white sm:px-8">
+              <div className="flex items-center gap-3">
+                {restaurant?.logo_url ? (
+                  <img
+                    src={restaurant.logo_url}
+                    alt={restaurant.name}
+                    className="h-12 w-12 rounded-2xl bg-white object-contain p-1"
+                  />
+                ) : (
+                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/15 text-2xl">
+                    🍽️
+                  </div>
+                )}
+
+                <div className="min-w-0">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-white/70">
+                    Welcome to
+                  </p>
+                  <h1 className="truncate text-xl font-bold">
+                    {restaurant?.name || "Restaurant"}
+                  </h1>
+                </div>
+              </div>
+
+              <div className="mt-6 flex items-center justify-between rounded-2xl bg-white/10 px-4 py-3 backdrop-blur">
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-white/60">
+                    Your table
+                  </p>
+                  <p className="mt-1 text-sm font-bold">
+                    Table {tableNumber}
+                  </p>
+                </div>
+                <span className="text-2xl">🪑</span>
+              </div>
+            </div>
+
+            <div className="p-6 sm:p-8">
+              <h2 className="text-2xl font-bold tracking-tight">
+                Let&apos;s get you started
+              </h2>
+
+              <p className="mt-2 text-sm leading-6 text-[#6B7280]">
+                Enter your name and mobile number to access the menu and place orders from your table.
+              </p>
+
+              <div className="mt-6 space-y-4">
+                <label className="block">
+                  <span className="mb-2 block text-xs font-bold text-[#374151]">
+                    Your name
+                  </span>
+                  <input
+                    type="text"
+                    value={customerName}
+                    onChange={(event) => {
+                      setCustomerName(event.target.value);
+                      setCustomerFormError("");
+                    }}
+                    placeholder="Enter your name"
+                    autoComplete="name"
+                    autoFocus
+                    className="h-13 w-full rounded-2xl border border-[#E5E7EB] bg-[#FAFAF9] px-4 text-sm outline-none transition focus:border-[#0C831F] focus:bg-white focus:ring-4 focus:ring-[#0C831F]/10"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="mb-2 block text-xs font-bold text-[#374151]">
+                    Mobile number
+                  </span>
+                  <div className="flex h-13 overflow-hidden rounded-2xl border border-[#E5E7EB] bg-[#FAFAF9] focus-within:border-[#0C831F] focus-within:bg-white focus-within:ring-4 focus-within:ring-[#0C831F]/10">
+                    <span className="flex items-center border-r border-[#E5E7EB] px-3 text-sm font-bold text-[#6B7280]">
+                      +91
+                    </span>
+                    <input
+                      type="tel"
+                      inputMode="numeric"
+                      maxLength={10}
+                      value={customerPhone}
+                      onChange={(event) => {
+                        const digits = event.target.value
+                          .replace(/\D/g, "")
+                          .slice(0, 10);
+                        setCustomerPhone(digits);
+                        setCustomerFormError("");
+                      }}
+                      placeholder="10-digit mobile number"
+                      autoComplete="tel"
+                      className="min-w-0 flex-1 bg-transparent px-4 text-sm outline-none"
+                    />
+                  </div>
+                </label>
+
+                {customerFormError && (
+                  <div className="rounded-2xl bg-[#FDECEC] px-4 py-3 text-sm font-medium text-[#B42318]">
+                    {customerFormError}
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  disabled={verifyingCustomer}
+                  onClick={continueToMenu}
+                  className="flex h-13 w-full items-center justify-center rounded-2xl bg-[#0C831F] text-sm font-bold text-white shadow-[0_10px_24px_rgba(12,131,31,0.20)] transition hover:bg-[#0A741B] active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {verifyingCustomer
+                    ? "Opening menu..."
+                    : "Continue to Menu →"}
+                </button>
+
+                <p className="text-center text-[11px] leading-5 text-[#9CA3AF]">
+                  Your details are used to identify your orders at this table.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  /*
+  ==========================================================
   MAIN
   ==========================================================
   */
@@ -1161,12 +1282,8 @@ export default function BrowseMenu({
 
               {restaurant?.logo_url ? (
                 <img
-                  src={
-                    restaurant.logo_url
-                  }
-                  alt={
-                    restaurant.name
-                  }
+                  src={restaurant.logo_url}
+                  alt={restaurant.name}
                   className="h-11 w-11 shrink-0 rounded-xl border border-[#EEEEEE] bg-white object-contain p-1"
                 />
               ) : (
@@ -1177,17 +1294,12 @@ export default function BrowseMenu({
 
               <div className="min-w-0">
                 <h1 className="truncate text-base font-bold sm:text-lg">
-                  {
-                    restaurant?.name
-                  }
+                  {restaurant?.name}
                 </h1>
 
                 <div className="mt-0.5 flex items-center gap-2 text-[11px] text-[#6B7280]">
                   <span className="rounded-full bg-[#E9F8E5] px-2 py-0.5 font-bold text-[#0C831F]">
-                    TABLE{" "}
-                    {
-                      tableNumber
-                    }
+                    TABLE {tableNumber}
                   </span>
 
                   <span>
@@ -1195,13 +1307,11 @@ export default function BrowseMenu({
                   </span>
                 </div>
               </div>
-
             </div>
 
             <div className="flex shrink-0 items-center gap-2">
 
-              {orders.length >
-                0 && (
+              {orders.length > 0 && (
                 <button
                   type="button"
                   onClick={() =>
@@ -1209,9 +1319,8 @@ export default function BrowseMenu({
                   }
                   className="relative flex h-10 items-center gap-1.5 rounded-xl border border-[#DCEBD8] bg-[#F4FBF2] px-3 text-xs font-bold text-[#0C831F]"
                 >
-                  <span>
-                    📦
-                  </span>
+                  <span>📦</span>
+
                   <span className="hidden sm:inline">
                     Orders
                   </span>
@@ -1231,34 +1340,25 @@ export default function BrowseMenu({
                 data-cart-button
                 type="button"
                 onClick={() =>
-                  setCartOpen(
-                    true
-                  )
+                  setCartOpen(true)
                 }
                 className="relative flex h-10 items-center gap-1.5 rounded-xl bg-[#0C831F] px-3 text-xs font-bold text-white shadow-[0_4px_12px_rgba(12,131,31,0.2)]"
               >
-                <span>
-                  🛒
-                </span>
+                <span>🛒</span>
 
                 <span className="hidden sm:inline">
                   Cart
                 </span>
 
-                {cartCount >
-                  0 && (
+                {cartCount > 0 && (
                   <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-white px-1 text-[9px] font-bold text-[#0C831F]">
-                    {
-                      cartCount
-                    }
+                    {cartCount}
                   </span>
                 )}
               </button>
 
             </div>
-
           </div>
-
         </header>
 
         {/* HERO */}
@@ -1281,9 +1381,7 @@ export default function BrowseMenu({
 
                 {restaurant?.description && (
                   <p className="mt-2 max-w-xl text-sm leading-6 text-white/75">
-                    {
-                      restaurant.description
-                    }
+                    {restaurant.description}
                   </p>
                 )}
 
@@ -1296,18 +1394,13 @@ export default function BrowseMenu({
                 </p>
 
                 <p className="mt-1 text-sm font-bold">
-                  Table{" "}
-                  {
-                    tableNumber
-                  }
+                  Table {tableNumber}
                 </p>
 
               </div>
 
             </div>
-
           </div>
-
         </section>
 
         {/* SUCCESS */}
@@ -1353,7 +1446,6 @@ export default function BrowseMenu({
             )}
 
           </div>
-
         </section>
 
         {/* CATEGORIES */}
@@ -1365,13 +1457,10 @@ export default function BrowseMenu({
             <button
               type="button"
               onClick={() =>
-                setActiveCategory(
-                  "all"
-                )
+                setActiveCategory("all")
               }
               className={`shrink-0 rounded-full px-4 py-2.5 text-xs font-bold ${
-                activeCategory ===
-                "all"
+                activeCategory === "all"
                   ? "bg-[#0C831F] text-white shadow-sm"
                   : "border border-[#E5E7EB] bg-white text-[#6B7280]"
               }`}
@@ -1382,9 +1471,7 @@ export default function BrowseMenu({
             {categories.map(
               (category) => (
                 <button
-                  key={
-                    category.id
-                  }
+                  key={category.id}
                   type="button"
                   onClick={() =>
                     setActiveCategory(
@@ -1398,15 +1485,12 @@ export default function BrowseMenu({
                       : "border border-[#E5E7EB] bg-white text-[#6B7280]"
                   }`}
                 >
-                  {
-                    category.name
-                  }
+                  {category.name}
                 </button>
               )
             )}
 
           </div>
-
         </section>
 
         {/* MENU */}
@@ -1434,29 +1518,21 @@ export default function BrowseMenu({
               </h2>
 
               <p className="mt-1 text-xs text-[#6B7280]">
-                {
-                  filteredItems.length
-                }{" "}
-                {filteredItems.length ===
-                1
+                {filteredItems.length}{" "}
+                {filteredItems.length === 1
                   ? "item"
                   : "items"}{" "}
                 available
               </p>
             </div>
 
-            {items.length >
-              0 && (
+            {items.length > 0 && (
               <button
                 type="button"
                 onClick={async () => {
-                  setMenuRefreshing(
-                    true
-                  );
+                  setMenuRefreshing(true);
 
-                  const {
-                    data,
-                  } =
+                  const { data } =
                     await createClient()
                       .from(
                         "menu_items"
@@ -1472,19 +1548,13 @@ export default function BrowseMenu({
                         "is_available",
                         true
                       )
-                      .order(
-                        "name"
-                      );
+                      .order("name");
 
                   if (data) {
-                    setItems(
-                      data
-                    );
+                    setItems(data);
                   }
 
-                  setMenuRefreshing(
-                    false
-                  );
+                  setMenuRefreshing(false);
                 }}
                 className="rounded-xl border border-[#E5E7EB] bg-white px-3 py-2 text-xs font-bold text-[#6B7280]"
               >
@@ -1496,14 +1566,11 @@ export default function BrowseMenu({
 
           </div>
 
-          {filteredItems.length ===
-          0 ? (
+          {filteredItems.length === 0 ? (
             <div className="customer-reveal rounded-[22px] border border-[#E9E9E7] bg-white p-10 text-center">
 
               <div className="text-5xl">
-                {search
-                  ? "🔎"
-                  : "🍽️"}
+                {search ? "🔎" : "🍽️"}
               </div>
 
               <h3 className="mt-4 text-lg font-bold">
@@ -1522,9 +1589,7 @@ export default function BrowseMenu({
                 <button
                   type="button"
                   onClick={() =>
-                    setSearch(
-                      ""
-                    )
+                    setSearch("")
                   }
                   className="mt-4 rounded-xl bg-[#0C831F] px-4 py-2.5 text-xs font-bold text-white"
                 >
@@ -1539,41 +1604,45 @@ export default function BrowseMenu({
               {filteredItems.map(
                 (item) => (
                   <div
-                    key={
-                      item.id
-                    }
+                    key={item.id}
                     className="product-card"
                   >
                     <ProductCard
-  key={item.id}
-  image={
-    item.image_url ||
-    "/placeholder-food.png"
-  }
-  name={item.name}
-  unit={
-    item.description ||
-    "Freshly prepared"
-  }
-  price={Number(item.price)}
-  mrp={undefined}
-  discountPercent={undefined}
-  deliveryTime="10 MINS"
-
-  quantity={getCartQuantity(item.id)}
-
-  onAdd={() =>
-    addToCart(item)
-  }
-
-  onIncrease={() =>
-    increaseQuantity(item.id)
-  }
-
-  onDecrease={() =>
-    decreaseQuantity(item.id)
-  }
-/>
+                      key={item.id}
+                      image={
+                        item.image_url ||
+                        "/placeholder-food.png"
+                      }
+                      name={item.name}
+                      unit={
+                        item.description ||
+                        "Freshly prepared"
+                      }
+                      price={Number(
+                        item.price
+                      )}
+                      mrp={undefined}
+                      discountPercent={
+                        undefined
+                      }
+                      deliveryTime="10 MINS"
+                      quantity={getCartQuantity(
+                        item.id
+                      )}
+                      onAdd={() =>
+                        addToCart(item)
+                      }
+                      onIncrease={() =>
+                        increaseQuantity(
+                          item.id
+                        )
+                      }
+                      onDecrease={() =>
+                        decreaseQuantity(
+                          item.id
+                        )
+                      }
+                    />
 
                     <div className="pointer-events-none -mt-1 h-0" />
                   </div>
@@ -1582,22 +1651,18 @@ export default function BrowseMenu({
 
             </div>
           )}
-
         </section>
 
         {/* FLOATING CART */}
 
-        {cartCount >
-          0 && (
+        {cartCount > 0 && (
           <div className="fixed bottom-4 left-4 right-4 z-50 mx-auto max-w-xl">
 
             <button
               data-cart-button
               type="button"
               onClick={() =>
-                setCartOpen(
-                  true
-                )
+                setCartOpen(true)
               }
               className="flex w-full items-center justify-between rounded-2xl bg-[#0C831F] px-4 py-3.5 text-white shadow-[0_12px_30px_rgba(12,131,31,0.25)]"
             >
@@ -1612,8 +1677,7 @@ export default function BrowseMenu({
 
                   <p className="text-xs font-bold text-white/70">
                     {cartCount}{" "}
-                    {cartCount ===
-                    1
+                    {cartCount === 1
                       ? "item"
                       : "items"}
                   </p>
@@ -1623,25 +1687,18 @@ export default function BrowseMenu({
                   </p>
 
                 </div>
-
               </div>
 
               <span className="text-base font-bold">
                 ₹
-                {cartTotal.toFixed(
-                  0
-                )}{" "}
-                →
+                {cartTotal.toFixed(0)} →
               </span>
 
             </button>
-
           </div>
         )}
 
-        {/* ==================================================
-            CART MODAL
-        ================================================== */}
+        {/* CART MODAL */}
 
         {cartOpen && (
           <div
@@ -1651,9 +1708,7 @@ export default function BrowseMenu({
                 event.target ===
                 event.currentTarget
               ) {
-                setCartOpen(
-                  false
-                );
+                setCartOpen(false);
               }
             }}
           >
@@ -1672,19 +1727,14 @@ export default function BrowseMenu({
                   </h2>
 
                   <p className="mt-1 text-xs text-[#6B7280]">
-                    Table{" "}
-                    {
-                      tableNumber
-                    }
+                    Table {tableNumber}
                   </p>
                 </div>
 
                 <button
                   type="button"
                   onClick={() =>
-                    setCartOpen(
-                      false
-                    )
+                    setCartOpen(false)
                   }
                   className="flex h-9 w-9 items-center justify-center rounded-full bg-[#F5F5F5] text-xl text-[#6B7280]"
                 >
@@ -1693,8 +1743,7 @@ export default function BrowseMenu({
 
               </div>
 
-              {cart.length ===
-              0 ? (
+              {cart.length === 0 ? (
                 <div className="py-12 text-center">
 
                   <div className="text-5xl">
@@ -1717,9 +1766,7 @@ export default function BrowseMenu({
                     {cart.map(
                       (item) => (
                         <div
-                          key={
-                            item.id
-                          }
+                          key={item.id}
                           className="flex gap-3 rounded-2xl border border-[#EEEEEE] p-3"
                         >
 
@@ -1728,9 +1775,7 @@ export default function BrowseMenu({
                               src={
                                 item.image_url
                               }
-                              alt={
-                                item.name
-                              }
+                              alt={item.name}
                               className="h-16 w-16 shrink-0 rounded-xl bg-[#F7F7F5] object-contain p-1"
                             />
                           ) : (
@@ -1742,18 +1787,14 @@ export default function BrowseMenu({
                           <div className="min-w-0 flex-1">
 
                             <p className="line-clamp-2 text-sm font-bold">
-                              {
-                                item.name
-                              }
+                              {item.name}
                             </p>
 
                             <p className="mt-1 text-xs text-[#6B7280]">
                               ₹
                               {Number(
                                 item.price
-                              ).toFixed(
-                                0
-                              )}{" "}
+                              ).toFixed(0)}{" "}
                               each
                             </p>
 
@@ -1772,9 +1813,7 @@ export default function BrowseMenu({
                               </button>
 
                               <span className="w-7 text-center text-xs font-bold">
-                                {
-                                  item.quantity
-                                }
+                                {item.quantity}
                               </span>
 
                               <button
@@ -1790,7 +1829,6 @@ export default function BrowseMenu({
                               </button>
 
                             </div>
-
                           </div>
 
                           <p className="shrink-0 pt-1 text-sm font-bold">
@@ -1800,9 +1838,7 @@ export default function BrowseMenu({
                                 item.price
                               ) *
                               item.quantity
-                            ).toFixed(
-                              0
-                            )}
+                            ).toFixed(0)}
                           </p>
 
                         </div>
@@ -1814,15 +1850,15 @@ export default function BrowseMenu({
                   <div className="mt-5 rounded-2xl bg-[#F7F7F5] p-4">
 
                     <div className="flex items-center justify-between text-sm">
+
                       <span className="text-[#6B7280]">
                         Items
                       </span>
 
                       <span className="font-bold">
-                        {
-                          cartCount
-                        }
+                        {cartCount}
                       </span>
+
                     </div>
 
                     <div className="mt-2 flex items-center justify-between">
@@ -1833,9 +1869,7 @@ export default function BrowseMenu({
 
                       <span className="text-xl font-bold">
                         ₹
-                        {cartTotal.toFixed(
-                          0
-                        )}
+                        {cartTotal.toFixed(0)}
                       </span>
 
                     </div>
@@ -1844,20 +1878,14 @@ export default function BrowseMenu({
 
                   {orderMessage && (
                     <div className="mt-4 rounded-xl bg-red-50 p-3 text-sm font-medium text-red-700">
-                      {
-                        orderMessage
-                      }
+                      {orderMessage}
                     </div>
                   )}
 
                   <button
                     type="button"
-                    disabled={
-                      placingOrder
-                    }
-                    onClick={
-                      placeOrder
-                    }
+                    disabled={placingOrder}
+                    onClick={placeOrder}
                     className="mt-4 flex w-full items-center justify-center rounded-xl bg-[#0C831F] py-4 text-sm font-bold text-white shadow-lg disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {placingOrder
@@ -1870,13 +1898,10 @@ export default function BrowseMenu({
               )}
 
             </div>
-
           </div>
         )}
 
-        {/* ==================================================
-            TRACKING MODAL
-        ================================================== */}
+        {/* TRACKING MODAL */}
 
         {trackingOpen &&
           selectedOrder && (
@@ -1906,17 +1931,9 @@ export default function BrowseMenu({
                   </h2>
 
                   <p className="mt-1 text-xs text-[#6B7280]">
-                    Table{" "}
-                    {
-                      tableNumber
-                    }{" "}
-                    •{" "}
-                    {
-                      orders.length
-                    }{" "}
-                    total order
-                    {orders.length ===
-                    1
+                    Table {tableNumber} •{" "}
+                    {orders.length} total order
+                    {orders.length === 1
                       ? ""
                       : "s"}
                   </p>
@@ -1924,9 +1941,7 @@ export default function BrowseMenu({
 
                 <button
                   type="button"
-                  onClick={
-                    closeTracking
-                  }
+                  onClick={closeTracking}
                   className="flex h-9 w-9 items-center justify-center rounded-full bg-[#F5F5F5] text-xl text-[#6B7280]"
                 >
                   ×
@@ -1936,16 +1951,13 @@ export default function BrowseMenu({
 
               {/* ORDER SELECTOR */}
 
-              {orders.length >
-                1 && (
+              {orders.length > 1 && (
                 <div className="mt-5 flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
 
                   {orders.map(
                     (order, index) => (
                       <button
-                        key={
-                          order.id
-                        }
+                        key={order.id}
                         type="button"
                         onClick={() =>
                           setSelectedOrderId(
@@ -1960,18 +1972,14 @@ export default function BrowseMenu({
                         }`}
                       >
                         <p className="text-[10px] font-bold uppercase tracking-wider text-[#9CA3AF]">
-                          Order{" "}
-                          {index +
-                            1}
+                          Order {index + 1}
                         </p>
 
                         <p className="mt-0.5 text-xs font-bold">
                           ₹
                           {Number(
                             order.total_amount
-                          ).toFixed(
-                            0
-                          )}
+                          ).toFixed(0)}
                         </p>
 
                         <span
@@ -2040,9 +2048,7 @@ export default function BrowseMenu({
 
                       return (
                         <div
-                          key={
-                            step.number
-                          }
+                          key={step.number}
                           className="flex items-center gap-3"
                         >
 
@@ -2057,9 +2063,7 @@ export default function BrowseMenu({
                                 : ""
                             }`}
                           >
-                            {
-                              step.icon
-                            }
+                            {step.icon}
                           </div>
 
                           <div className="min-w-0">
@@ -2071,15 +2075,11 @@ export default function BrowseMenu({
                                   : "text-[#9CA3AF]"
                               }`}
                             >
-                              {
-                                step.label
-                              }
+                              {step.label}
                             </p>
 
                             <p className="text-xs text-[#6B7280]">
-                              {
-                                step.text
-                              }
+                              {step.text}
                             </p>
 
                           </div>
@@ -2114,9 +2114,7 @@ export default function BrowseMenu({
                       ₹
                       {Number(
                         selectedOrder.total_amount
-                      ).toFixed(
-                        0
-                      )}
+                      ).toFixed(0)}
                     </span>
 
                   </div>
@@ -2137,22 +2135,17 @@ export default function BrowseMenu({
                   </p>
 
                 </div>
-
               </div>
 
-              {orders.length >
-                1 && (
+              {orders.length > 1 && (
                 <p className="mt-4 text-center text-xs text-[#6B7280]">
-                  You have{" "}
-                  {
-                    orders.length
-                  }{" "}
-                  orders linked to this table. Tap an order above to track it.
+                  You have {orders.length}{" "}
+                  orders linked to this table.
+                  Tap an order above to track it.
                 </p>
               )}
 
             </div>
-
           </div>
         )}
 
